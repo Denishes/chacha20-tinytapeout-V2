@@ -23,7 +23,7 @@ subprocess.run([
     "-Ptb.N=" + str(len(vectors)),
     "-o", str(build / "sim"),
     str(root / "src" / "chacha20_core.v"),
-    str(root / "src" / "tt_um_dinis_chacha20.v"),
+    str(root / "src" / "tt_um_dinis_chacha20_V2.v"),
     str(root / "test" / "tb.sv"),
 ], check=True)
 
