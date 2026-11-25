@@ -1,4 +1,5 @@
 `timescale 1ns/1ps
+
 module tb;
 reg clk, rst_n, ena;
 reg [7:0] ui_in, uio_in;
