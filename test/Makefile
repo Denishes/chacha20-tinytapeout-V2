@@ -1,6 +1,6 @@
 SIM ?= icarus
 TOPLEVEL_LANG = verilog
-PROJECT_SOURCES = tt_um_dinis_chacha20.v chacha20_core.v
+PROJECT_SOURCES = tt_um_dinis_chacha20_V2.v chacha20_core.v
 TOPLEVEL = tb
 MODULE = test
 COMPILE_ARGS += -g2012

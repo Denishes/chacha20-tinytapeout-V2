@@ -7,7 +7,7 @@ wire [7:0] uo_out, uio_out, uio_oe;
 supply1 VPWR;
 supply0 VGND;
 `endif
-tt_um_dinis_chacha20 dut (
+tt_um_dinis_chacha20_V2 dut (
 `ifdef GL_TEST
  .VPWR(VPWR), .VGND(VGND),
 `endif

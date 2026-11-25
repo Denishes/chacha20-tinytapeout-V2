@@ -6,7 +6,7 @@ project:
   language: "Verilog"
   clock_hz: 10000000
   tiles: "4x2"
-  top_module: "tt_um_dinis_chacha20"
+  top_module: "tt_um_dinis_chacha20_V2"
   source_files:
     - "tt_um_dinis_chacha20.v"
     - "chacha20_core.v"
