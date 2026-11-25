@@ -8,7 +8,7 @@ project:
   tiles: "4x2"
   top_module: "tt_um_dinis_chacha20_V2"
   source_files:
-    - "tt_um_dinis_chacha20.v"
+    - "tt_um_dinis_chacha20_V2.v"
     - "chacha20_core.v"
 pinout:
   ui[0]: "data_in[0]"

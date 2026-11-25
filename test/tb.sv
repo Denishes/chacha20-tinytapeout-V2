@@ -10,7 +10,7 @@ module tb;
     reg [7:0] ui_in = 0, uio_in = 0;
     wire [7:0] uo_out, uio_out, uio_oe;
 
-    tt_um_dinis_chacha20 dut (.*);
+    tt_um_dinis_chacha20_V2 dut (.*);
 
     // Selector byte + 16 plaintext bytes.
     reg [135:0] frames [0:N-1];

@@ -1,6 +1,6 @@
 `default_nettype none
 
-module tt_um_dinis_chacha20 (
+module tt_um_dinis_chacha20_V2 (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,
     input  wire [7:0] uio_in,
