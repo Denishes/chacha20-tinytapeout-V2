@@ -1,21 +1,17 @@
 `default_nettype none
 
-// Iterative ChaCha20 with four complete quarter-round units.
+// ChaCha20: two complete quarter-round units.
 //
-// One column round per cycle.
-// One diagonal round per cycle.
-// Ten double-rounds = 20 processing cycles.
+// 20 rounds x 4 quarter-rounds / 2 units = 40 processing cycles.
 // Final feed-forward and plaintext XOR = 1 additional cycle.
 //
-// Latency: 21 cycles from accepted start to done.
-// Minimum initiation interval: 22 cycles.
+// Latency: 41 cycles from accepted start to done.
+// Minimum initiation interval: 42 cycles.
 //
-// start is accepted only in ST_IDLE.
-// Inputs are captured when the request is accepted.
+// Inputs are captured when start is accepted in ST_IDLE.
 // start is ignored while processing.
-//
-// done pulses for one cycle when data_out becomes valid.
-// data_out holds its value until another result or reset.
+// done is asserted for one cycle.
+// data_out holds its value until the next result or reset.
 //
 // Synchronous active-high reset aborts the current operation.
 //
@@ -24,9 +20,7 @@
 //   key word 0   = [255:224]
 //   nonce word 0 = [95:64]
 //
-// Encrypts 128 bits using the first four keystream words.
-//
-// All helper logic is included in this file.
+// Encrypts 128 bits using the first four ChaCha20 keystream words.
 
 module chacha20_core (
     input  wire         clk,
@@ -54,124 +48,121 @@ module chacha20_core (
     localparam [31:0] C3 = 32'h6b206574;
 
     reg [1:0] state_ctrl;
+
+    // 0: process quarter-round indices 0 and 1.
+    // 1: process quarter-round indices 2 and 3.
+    reg qr_pair;
+
+    // Counts ten column/diagonal pairs: 0 through 9.
     reg [3:0] double_round_count;
 
     reg [511:0] working_state;
+    reg [511:0] working_next;
     reg [127:0] data_reg;
 
-    wire [511:0] input_state = {
+    wire [511:0] input_state;
+
+    assign input_state = {
         C0, C1, C2, C3,
         key,
         counter,
         nonce
     };
 
-    // Unpack the sixteen numerical 32-bit state words.
-    wire [31:0] s0  = working_state[511:480];
-    wire [31:0] s1  = working_state[479:448];
-    wire [31:0] s2  = working_state[447:416];
-    wire [31:0] s3  = working_state[415:384];
+    // Four banks, each containing four 32-bit words.
+    //
+    // bank_a: s0,  s1,  s2,  s3
+    // bank_b: s4,  s5,  s6,  s7
+    // bank_c: s8,  s9,  s10, s11
+    // bank_d: s12, s13, s14, s15
 
-    wire [31:0] s4  = working_state[383:352];
-    wire [31:0] s5  = working_state[351:320];
-    wire [31:0] s6  = working_state[319:288];
-    wire [31:0] s7  = working_state[287:256];
-
-    wire [31:0] s8  = working_state[255:224];
-    wire [31:0] s9  = working_state[223:192];
-    wire [31:0] s10 = working_state[191:160];
-    wire [31:0] s11 = working_state[159:128];
-
-    wire [31:0] s12 = working_state[127:96];
-    wire [31:0] s13 = working_state[95:64];
-    wire [31:0] s14 = working_state[63:32];
-    wire [31:0] s15 = working_state[31:0];
+    wire [127:0] bank_a = working_state[511:384];
+    wire [127:0] bank_b = working_state[383:256];
+    wire [127:0] bank_c = working_state[255:128];
+    wire [127:0] bank_d = working_state[127:0];
 
     wire use_diagonal = (state_ctrl == ST_DIAGONAL);
 
-    wire [31:0] q0a, q0b, q0c, q0d;
-    wire [31:0] q1a, q1b, q1c, q1d;
-    wire [31:0] q2a, q2b, q2c, q2d;
-    wire [31:0] q3a, q3b, q3c, q3d;
+    // Selectors for each physical quarter-round unit.
+    wire [1:0] sel_a [0:1];
+    wire [1:0] sel_b [0:1];
+    wire [1:0] sel_c [0:1];
+    wire [1:0] sel_d [0:1];
 
-    // Four physical quarter-round units.
-    // The same units are reused for columns and diagonals.
+    // Results from the two quarter-round units.
+    wire [31:0] qa [0:1];
+    wire [31:0] qb [0:1];
+    wire [31:0] qc [0:1];
+    wire [31:0] qd [0:1];
 
-    // Column:   QR(0, 4, 8, 12)
-    // Diagonal: QR(0, 5, 10, 15)
-    chacha20_qr_iter4 qr0 (
-        .a(s0),
-        .b(use_diagonal ? s5  : s4),
-        .c(use_diagonal ? s10 : s8),
-        .d(use_diagonal ? s15 : s12),
+    genvar g;
+    generate
+        for (g = 0; g < 2; g = g + 1) begin : QR_UNITS
 
-        .a_out(q0a),
-        .b_out(q0b),
-        .c_out(q0c),
-        .d_out(q0d)
-    );
+            // g is a generate-time constant: 0 or 1.
+            // Concatenation produces an exact two-bit selector.
+            assign sel_a[g] = {qr_pair, g[0]};
 
-    // Column:   QR(1, 5, 9, 13)
-    // Diagonal: QR(1, 6, 11, 12)
-    chacha20_qr_iter4 qr1 (
-        .a(s1),
-        .b(use_diagonal ? s6  : s5),
-        .c(use_diagonal ? s11 : s9),
-        .d(use_diagonal ? s12 : s13),
+            // Two-bit additions wrap modulo 4.
+            assign sel_b[g] =
+                sel_a[g] + (use_diagonal ? 2'd1 : 2'd0);
 
-        .a_out(q1a),
-        .b_out(q1b),
-        .c_out(q1c),
-        .d_out(q1d)
-    );
+            assign sel_c[g] =
+                sel_a[g] + (use_diagonal ? 2'd2 : 2'd0);
 
-    // Column:   QR(2, 6, 10, 14)
-    // Diagonal: QR(2, 7, 8, 13)
-    chacha20_qr_iter4 qr2 (
-        .a(s2),
-        .b(use_diagonal ? s7  : s6),
-        .c(use_diagonal ? s8  : s10),
-        .d(use_diagonal ? s13 : s14),
+            assign sel_d[g] =
+                sel_a[g] + (use_diagonal ? 2'd3 : 2'd0);
 
-        .a_out(q2a),
-        .b_out(q2b),
-        .c_out(q2c),
-        .d_out(q2d)
-    );
+            chacha20_qr_iter2 qr_inst (
+                .a(bank_a[127-32*sel_a[g] -: 32]),
+                .b(bank_b[127-32*sel_b[g] -: 32]),
+                .c(bank_c[127-32*sel_c[g] -: 32]),
+                .d(bank_d[127-32*sel_d[g] -: 32]),
 
-    // Column:   QR(3, 7, 11, 15)
-    // Diagonal: QR(3, 4, 9, 14)
-    chacha20_qr_iter4 qr3 (
-        .a(s3),
-        .b(use_diagonal ? s4  : s7),
-        .c(use_diagonal ? s9  : s11),
-        .d(use_diagonal ? s14 : s15),
+                .a_out(qa[g]),
+                .b_out(qb[g]),
+                .c_out(qc[g]),
+                .d_out(qd[g])
+            );
 
-        .a_out(q3a),
-        .b_out(q3b),
-        .c_out(q3c),
-        .d_out(q3d)
-    );
+        end
+    endgenerate
 
-    // Restore the original state-word order after a column round.
-    wire [511:0] column_result = {
-        q0a, q1a, q2a, q3a,
-        q0b, q1b, q2b, q3b,
-        q0c, q1c, q2c, q3c,
-        q0d, q1d, q2d, q3d
-    };
+    // Each cycle updates eight words and preserves the other eight.
+    // The two quarter-round units operate on disjoint words.
+    integer i;
 
-    // Restore the original state-word order after a diagonal round.
-    wire [511:0] diagonal_result = {
-        q0a, q1a, q2a, q3a,
-        q3b, q0b, q1b, q2b,
-        q2c, q3c, q0c, q1c,
-        q1d, q2d, q3d, q0d
-    };
+    always @* begin
+        working_next = working_state;
 
-    // Feed-forward for the first four output words.
-    // Their initial values are always the ChaCha20 constants.
-    // All additions are modulo 2^32.
+        for (i = 0; i < 4; i = i + 1) begin
+
+            if (sel_a[0] == i[1:0])
+                working_next[511-32*i -: 32] = qa[0];
+            else if (sel_a[1] == i[1:0])
+                working_next[511-32*i -: 32] = qa[1];
+
+            if (sel_b[0] == i[1:0])
+                working_next[383-32*i -: 32] = qb[0];
+            else if (sel_b[1] == i[1:0])
+                working_next[383-32*i -: 32] = qb[1];
+
+            if (sel_c[0] == i[1:0])
+                working_next[255-32*i -: 32] = qc[0];
+            else if (sel_c[1] == i[1:0])
+                working_next[255-32*i -: 32] = qc[1];
+
+            if (sel_d[0] == i[1:0])
+                working_next[127-32*i -: 32] = qd[0];
+            else if (sel_d[1] == i[1:0])
+                working_next[127-32*i -: 32] = qd[1];
+
+        end
+    end
+
+    // Only the first four feed-forward words are needed.
+    // Their original values are always C0, C1, C2 and C3.
+    // Each addition is modulo 2^32.
     wire [31:0] f0 = working_state[511:480] + C0;
     wire [31:0] f1 = working_state[479:448] + C1;
     wire [31:0] f2 = working_state[447:416] + C2;
@@ -182,6 +173,7 @@ module chacha20_core (
     always @(posedge clk) begin
         if (rst) begin
             state_ctrl         <= ST_IDLE;
+            qr_pair            <= 1'b0;
             double_round_count <= 4'd0;
 
             working_state      <= 512'd0;
@@ -201,34 +193,52 @@ module chacha20_core (
                         working_state      <= input_state;
                         data_reg           <= data_in;
 
+                        qr_pair            <= 1'b0;
                         double_round_count <= 4'd0;
+
                         state_ctrl         <= ST_COLUMN;
                     end
                 end
 
                 ST_COLUMN: begin
-                    // Four column quarter-rounds complete together.
-                    working_state <= column_result;
-                    state_ctrl    <= ST_DIAGONAL;
+                    // Commit two complete column quarter-rounds.
+                    working_state <= working_next;
+
+                    if (!qr_pair) begin
+                        // Next cycle processes indices 2 and 3.
+                        qr_pair <= 1'b1;
+                    end else begin
+                        // All four column quarter-rounds completed.
+                        qr_pair    <= 1'b0;
+                        state_ctrl <= ST_DIAGONAL;
+                    end
                 end
 
                 ST_DIAGONAL: begin
-                    // Four diagonal quarter-rounds complete together.
-                    working_state <= diagonal_result;
+                    // Commit two complete diagonal quarter-rounds.
+                    working_state <= working_next;
 
-                    if (double_round_count == 4'd9) begin
-                        // Ten double-rounds = twenty rounds.
-                        state_ctrl <= ST_FINAL;
+                    if (!qr_pair) begin
+                        // Next cycle processes indices 2 and 3.
+                        qr_pair <= 1'b1;
                     end else begin
-                        double_round_count <=
-                            double_round_count + 4'd1;
+                        // One complete double-round has finished.
+                        qr_pair <= 1'b0;
 
-                        state_ctrl <= ST_COLUMN;
+                        if (double_round_count == 4'd9) begin
+                            // Ten double-rounds = twenty rounds.
+                            state_ctrl <= ST_FINAL;
+                        end else begin
+                            double_round_count <=
+                                double_round_count + 4'd1;
+
+                            state_ctrl <= ST_COLUMN;
+                        end
                     end
                 end
 
                 ST_FINAL: begin
-                    // State already includes all twenty rounds.
+                    // working_state contains all twenty rounds.
                     data_out <= data_reg ^ keystream_128;
                     done     <= 1'b1;
 
@@ -237,6 +247,7 @@ module chacha20_core (
 
                 default: begin
                     state_ctrl         <= ST_IDLE;
+                    qr_pair            <= 1'b0;
                     double_round_count <= 4'd0;
                 end
 
@@ -248,9 +259,10 @@ endmodule
 
 
 // Complete combinational ChaCha20 quarter-round.
-// Instantiated four times by chacha20_core.
+// Each addition wraps modulo 2^32.
+// Rotations are implemented as fixed wiring.
 
-module chacha20_qr_iter4 (
+module chacha20_qr_iter2 (
     input  wire [31:0] a,
     input  wire [31:0] b,
     input  wire [31:0] c,
