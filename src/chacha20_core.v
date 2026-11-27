@@ -1,26 +1,25 @@
 `default_nettype none
 
-// ChaCha20: two complete quarter-round units.
+// ChaCha20: one complete quarter-round per clock.
 //
-// 20 rounds x 4 quarter-rounds / 2 units = 40 processing cycles.
-// Final feed-forward and plaintext XOR = 1 additional cycle.
+// 80 processing cycles + 1 final feed-forward/XOR cycle.
+// Latency: 81 clock periods from accepted start to done.
+// Minimum initiation interval: 82 clock periods.
 //
-// Latency: 41 cycles from accepted start to done.
-// Minimum initiation interval: 42 cycles.
-//
-// Inputs are captured when start is accepted in ST_IDLE.
+// Inputs are captured when start is high in ST_IDLE.
 // start is ignored while processing.
-// done is asserted for one cycle.
+// done pulses for one cycle.
 // data_out holds its value until the next result or reset.
 //
-// Synchronous active-high reset aborts the current operation.
+// Synchronous active-high reset aborts the operation.
 //
 // Packing:
 //   state word 0 = [511:480]
 //   key word 0   = [255:224]
 //   nonce word 0 = [95:64]
 //
-// Encrypts 128 bits using the first four ChaCha20 keystream words.
+// Encrypts 128 bits using the first four keystream words.
+// Byte-order conversion remains the wrapper's responsibility.
 
 module chacha20_core (
     input  wire         clk,
@@ -48,12 +47,7 @@ module chacha20_core (
     localparam [31:0] C3 = 32'h6b206574;
 
     reg [1:0] state_ctrl;
-
-    // 0: process quarter-round indices 0 and 1.
-    // 1: process quarter-round indices 2 and 3.
-    reg qr_pair;
-
-    // Counts ten column/diagonal pairs: 0 through 9.
+    reg [1:0] qr_index;
     reg [3:0] double_round_count;
 
     reg [511:0] working_state;
@@ -70,187 +64,157 @@ module chacha20_core (
     };
 
     // Four banks, each containing four 32-bit words.
-    //
-    // bank_a: s0,  s1,  s2,  s3
-    // bank_b: s4,  s5,  s6,  s7
-    // bank_c: s8,  s9,  s10, s11
-    // bank_d: s12, s13, s14, s15
+    wire [127:0] bank_a;
+    wire [127:0] bank_b;
+    wire [127:0] bank_c;
+    wire [127:0] bank_d;
 
-    wire [127:0] bank_a = working_state[511:384];
-    wire [127:0] bank_b = working_state[383:256];
-    wire [127:0] bank_c = working_state[255:128];
-    wire [127:0] bank_d = working_state[127:0];
+    assign bank_a = working_state[511:384];
+    assign bank_b = working_state[383:256];
+    assign bank_c = working_state[255:128];
+    assign bank_d = working_state[127:0];
 
-    wire use_diagonal = (state_ctrl == ST_DIAGONAL);
+    wire use_diagonal;
+    assign use_diagonal = (state_ctrl == ST_DIAGONAL);
 
-    // Selectors for each physical quarter-round unit.
-    wire [1:0] sel_a [0:1];
-    wire [1:0] sel_b [0:1];
-    wire [1:0] sel_c [0:1];
-    wire [1:0] sel_d [0:1];
+    // Two-bit selectors wrap modulo 4.
+    wire [1:0] sel_a;
+    wire [1:0] sel_b;
+    wire [1:0] sel_c;
+    wire [1:0] sel_d;
 
-    // Results from the two quarter-round units.
-    wire [31:0] qa [0:1];
-    wire [31:0] qb [0:1];
-    wire [31:0] qc [0:1];
-    wire [31:0] qd [0:1];
+    assign sel_a = qr_index;
+    assign sel_b = qr_index + (use_diagonal ? 2'd1 : 2'd0);
+    assign sel_c = qr_index + (use_diagonal ? 2'd2 : 2'd0);
+    assign sel_d = qr_index + (use_diagonal ? 2'd3 : 2'd0);
 
-    genvar g;
-    generate
-        for (g = 0; g < 2; g = g + 1) begin : QR_UNITS
+    wire [31:0] qr_a;
+    wire [31:0] qr_b;
+    wire [31:0] qr_c;
+    wire [31:0] qr_d;
 
-            // g is a generate-time constant: 0 or 1.
-            // Concatenation produces an exact two-bit selector.
-            assign sel_a[g] = {qr_pair, g[0]};
+    assign qr_a = bank_a[127 - 32*sel_a -: 32];
+    assign qr_b = bank_b[127 - 32*sel_b -: 32];
+    assign qr_c = bank_c[127 - 32*sel_c -: 32];
+    assign qr_d = bank_d[127 - 32*sel_d -: 32];
 
-            // Two-bit additions wrap modulo 4.
-            assign sel_b[g] =
-                sel_a[g] + (use_diagonal ? 2'd1 : 2'd0);
+    wire [31:0] qr_a_out;
+    wire [31:0] qr_b_out;
+    wire [31:0] qr_c_out;
+    wire [31:0] qr_d_out;
 
-            assign sel_c[g] =
-                sel_a[g] + (use_diagonal ? 2'd2 : 2'd0);
+    // One physical combinational quarter-round unit.
+    chacha20_qr_iter1 qr_inst (
+        .a     (qr_a),
+        .b     (qr_b),
+        .c     (qr_c),
+        .d     (qr_d),
+        .a_out (qr_a_out),
+        .b_out (qr_b_out),
+        .c_out (qr_c_out),
+        .d_out (qr_d_out)
+    );
 
-            assign sel_d[g] =
-                sel_a[g] + (use_diagonal ? 2'd3 : 2'd0);
-
-            chacha20_qr_iter2 qr_inst (
-                .a(bank_a[127-32*sel_a[g] -: 32]),
-                .b(bank_b[127-32*sel_b[g] -: 32]),
-                .c(bank_c[127-32*sel_c[g] -: 32]),
-                .d(bank_d[127-32*sel_d[g] -: 32]),
-
-                .a_out(qa[g]),
-                .b_out(qb[g]),
-                .c_out(qc[g]),
-                .d_out(qd[g])
-            );
-
-        end
-    endgenerate
-
-    // Each cycle updates eight words and preserves the other eight.
-    // The two quarter-round units operate on disjoint words.
+    // Update the four selected words; preserve the others.
     integer i;
 
     always @* begin
         working_next = working_state;
 
         for (i = 0; i < 4; i = i + 1) begin
+            if (sel_a == i[1:0])
+                working_next[511 - 32*i -: 32] = qr_a_out;
 
-            if (sel_a[0] == i[1:0])
-                working_next[511-32*i -: 32] = qa[0];
-            else if (sel_a[1] == i[1:0])
-                working_next[511-32*i -: 32] = qa[1];
+            if (sel_b == i[1:0])
+                working_next[383 - 32*i -: 32] = qr_b_out;
 
-            if (sel_b[0] == i[1:0])
-                working_next[383-32*i -: 32] = qb[0];
-            else if (sel_b[1] == i[1:0])
-                working_next[383-32*i -: 32] = qb[1];
+            if (sel_c == i[1:0])
+                working_next[255 - 32*i -: 32] = qr_c_out;
 
-            if (sel_c[0] == i[1:0])
-                working_next[255-32*i -: 32] = qc[0];
-            else if (sel_c[1] == i[1:0])
-                working_next[255-32*i -: 32] = qc[1];
-
-            if (sel_d[0] == i[1:0])
-                working_next[127-32*i -: 32] = qd[0];
-            else if (sel_d[1] == i[1:0])
-                working_next[127-32*i -: 32] = qd[1];
-
+            if (sel_d == i[1:0])
+                working_next[127 - 32*i -: 32] = qr_d_out;
         end
     end
 
-    // Only the first four feed-forward words are needed.
-    // Their original values are always C0, C1, C2 and C3.
-    // Each addition is modulo 2^32.
-    wire [31:0] f0 = working_state[511:480] + C0;
-    wire [31:0] f1 = working_state[479:448] + C1;
-    wire [31:0] f2 = working_state[447:416] + C2;
-    wire [31:0] f3 = working_state[415:384] + C3;
+    // The first four initial-state words are always C0..C3.
+    // No initial-state register is needed for this 128-bit output.
+    // Each addition wraps modulo 2^32.
+    wire [31:0] f0;
+    wire [31:0] f1;
+    wire [31:0] f2;
+    wire [31:0] f3;
+    wire [127:0] keystream_128;
 
-    wire [127:0] keystream_128 = {f0, f1, f2, f3};
+    assign f0 = working_state[511:480] + C0;
+    assign f1 = working_state[479:448] + C1;
+    assign f2 = working_state[447:416] + C2;
+    assign f3 = working_state[415:384] + C3;
+
+    assign keystream_128 = {f0, f1, f2, f3};
 
     always @(posedge clk) begin
         if (rst) begin
             state_ctrl         <= ST_IDLE;
-            qr_pair            <= 1'b0;
+            qr_index           <= 2'd0;
             double_round_count <= 4'd0;
-
             working_state      <= 512'd0;
             data_reg           <= 128'd0;
-
             data_out           <= 128'd0;
             done               <= 1'b0;
-
         end else begin
-            // Default: done is a one-cycle pulse.
             done <= 1'b0;
 
             case (state_ctrl)
-
                 ST_IDLE: begin
                     if (start) begin
                         working_state      <= input_state;
                         data_reg           <= data_in;
-
-                        qr_pair            <= 1'b0;
+                        qr_index           <= 2'd0;
                         double_round_count <= 4'd0;
-
                         state_ctrl         <= ST_COLUMN;
                     end
                 end
 
                 ST_COLUMN: begin
-                    // Commit two complete column quarter-rounds.
                     working_state <= working_next;
 
-                    if (!qr_pair) begin
-                        // Next cycle processes indices 2 and 3.
-                        qr_pair <= 1'b1;
-                    end else begin
-                        // All four column quarter-rounds completed.
-                        qr_pair    <= 1'b0;
+                    if (qr_index == 2'd3) begin
+                        qr_index   <= 2'd0;
                         state_ctrl <= ST_DIAGONAL;
+                    end else begin
+                        qr_index <= qr_index + 2'd1;
                     end
                 end
 
                 ST_DIAGONAL: begin
-                    // Commit two complete diagonal quarter-rounds.
                     working_state <= working_next;
 
-                    if (!qr_pair) begin
-                        // Next cycle processes indices 2 and 3.
-                        qr_pair <= 1'b1;
-                    end else begin
-                        // One complete double-round has finished.
-                        qr_pair <= 1'b0;
+                    if (qr_index == 2'd3) begin
+                        qr_index <= 2'd0;
 
                         if (double_round_count == 4'd9) begin
-                            // Ten double-rounds = twenty rounds.
                             state_ctrl <= ST_FINAL;
                         end else begin
                             double_round_count <=
                                 double_round_count + 4'd1;
-
                             state_ctrl <= ST_COLUMN;
                         end
+                    end else begin
+                        qr_index <= qr_index + 2'd1;
                     end
                 end
 
                 ST_FINAL: begin
-                    // working_state contains all twenty rounds.
-                    data_out <= data_reg ^ keystream_128;
-                    done     <= 1'b1;
-
+                    data_out   <= data_reg ^ keystream_128;
+                    done       <= 1'b1;
                     state_ctrl <= ST_IDLE;
                 end
 
                 default: begin
                     state_ctrl         <= ST_IDLE;
-                    qr_pair            <= 1'b0;
+                    qr_index           <= 2'd0;
                     double_round_count <= 4'd0;
                 end
-
             endcase
         end
     end
@@ -258,11 +222,8 @@ module chacha20_core (
 endmodule
 
 
-// Complete combinational ChaCha20 quarter-round.
-// Each addition wraps modulo 2^32.
-// Rotations are implemented as fixed wiring.
-
-module chacha20_qr_iter2 (
+// Combinational ChaCha20 quarter-round.
+module chacha20_qr_iter1 (
     input  wire [31:0] a,
     input  wire [31:0] b,
     input  wire [31:0] c,
@@ -276,26 +237,25 @@ module chacha20_qr_iter2 (
 
     wire [31:0] a1, b1, c1, d1;
     wire [31:0] a2, b2, c2, d2;
-
     wire [31:0] dx1, bx1;
     wire [31:0] dx2, bx2;
 
-    // a += b; d ^= a; d = ROTL(d, 16);
+    // a += b; d = ROTL(d XOR a, 16);
     assign a1  = a + b;
     assign dx1 = d ^ a1;
     assign d1  = {dx1[15:0], dx1[31:16]};
 
-    // c += d; b ^= c; b = ROTL(b, 12);
+    // c += d; b = ROTL(b XOR c, 12);
     assign c1  = c + d1;
     assign bx1 = b ^ c1;
     assign b1  = {bx1[19:0], bx1[31:20]};
 
-    // a += b; d ^= a; d = ROTL(d, 8);
+    // a += b; d = ROTL(d XOR a, 8);
     assign a2  = a1 + b1;
     assign dx2 = d1 ^ a2;
     assign d2  = {dx2[23:0], dx2[31:24]};
 
-    // c += d; b ^= c; b = ROTL(b, 7);
+    // c += d; b = ROTL(b XOR c, 7);
     assign c2  = c1 + d2;
     assign bx2 = b1 ^ c2;
     assign b2  = {bx2[24:0], bx2[31:25]};
