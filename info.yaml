@@ -5,7 +5,7 @@ project:
   description: "Iterative 20-round ChaCha20, first 128 output bits, synchronous byte interface"
   language: "Verilog"
   clock_hz: 10000000
-  tiles: "4x2"
+  tiles: "3x2"
   top_module: "tt_um_dinis_chacha20_V2"
   source_files:
     - "tt_um_dinis_chacha20_V2.v"
